@@ -19,7 +19,7 @@ import type { Store } from "./db.js"
 import type { CoreClient, EmailTemplate } from "./core.js"
 import type { Env, SocialProviderName } from "./env.js"
 import type { Logger, LogLevel } from "./logging.js"
-import { reported } from "./reporting.js"
+import { bestEffort, reported } from "./reporting.js"
 import { ac, ADMIN_ROLE, isRole, roles } from "./roles.js"
 
 export type AuthMethod =
@@ -57,6 +57,9 @@ export interface AuthDeps {
 	// drops every document connection the user holds, so each one
 	// reconnects under the user's new role.
 	closeUserConnections: (userId: string) => void
+	// drops the sockets authenticated with one session. The user's
+	// other sessions stay connected.
+	closeSessionConnections: (sessionToken: string) => void
 }
 
 // better-auth resolves its extra "success" level to info before calling out.
@@ -658,6 +661,7 @@ export function createAuth({
 	core,
 	log,
 	closeUserConnections,
+	closeSessionConnections,
 }: AuthDeps) {
 	const organizationHooks = createOrganizationHooks({
 		env,
@@ -1251,6 +1255,15 @@ export function createAuth({
 						}
 					},
 				},
+				// the user is gone, so every socket of theirs
+				// goes, whichever session opened it.
+				delete: {
+					after: (user) => {
+						closeUserConnections(user.id)
+
+						return Promise.resolve()
+					},
+				},
 			},
 			session: {
 				create: {
@@ -1297,6 +1310,48 @@ export function createAuth({
 								},
 							}
 						}),
+				},
+				// runs after the row is gone, so the reconnect
+				// that a dropped socket starts finds no session.
+				delete: {
+					after: async (session, ctx) => {
+						// change-password deletes every
+						// session, then mints a new one for
+						// the device that submitted it. That
+						// device's socket stays. It was just
+						// authenticated by the password they
+						// typed.
+						const currentToken =
+							ctx?.context.session
+								?.session.token
+						if (
+							ctx?.path ===
+								"/change-password" &&
+							currentToken !==
+								undefined &&
+							currentToken ===
+								session.token
+						) {
+							return
+						}
+
+						// the cached copy goes before the
+						// socket closes. User deletion
+						// removes it from valkey only after
+						// this hook, and a reconnect in
+						// between would be accepted.
+						if (redis) {
+							await bestEffort(() =>
+								redis.del(
+									session.token,
+								),
+							)
+						}
+
+						closeSessionConnections(
+							session.token,
+						)
+					},
 				},
 			},
 		},

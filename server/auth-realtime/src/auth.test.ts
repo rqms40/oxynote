@@ -72,19 +72,32 @@ function buildAuth(
 	const real = createDatabase("postgresql://u:p@localhost/d")
 	const core = overrides.core ?? stubCore()
 	const log = stubLog()
+	const closeUserConnections = vi.fn()
+	const closeSessionConnections = vi.fn()
+	// a caller that passes redis, even as undefined, chooses it. The
+	// default is a stub, so a test that never mentions redis still has one.
+	const redis = "redis" in overrides ? overrides.redis : stubRedis()
 	const auth = createAuth({
-		closeUserConnections: vi.fn(),
+		closeUserConnections,
+		closeSessionConnections,
 		env: overrides.env ?? testEnv(),
 		store: overrides.store ?? stubStore(),
 		dialect: real.dialect,
-		redis: overrides.redis ?? stubRedis(),
+		redis,
 		core,
 		log,
 	})
 
 	dropContextInit(auth)
 
-	return { auth, core, log }
+	return {
+		auth,
+		core,
+		log,
+		closeUserConnections,
+		closeSessionConnections,
+		redis,
+	}
 }
 
 // an email callback is left out when no email can be sent, so its type
@@ -1430,6 +1443,7 @@ describe("createAuth", () => {
 		const real = createDatabase("postgresql://u:p@localhost/d")
 		const auth = createAuth({
 			closeUserConnections: vi.fn(),
+			closeSessionConnections: vi.fn(),
 			env: testEnv(),
 			store: stubStore(),
 			dialect: real.dialect,
@@ -1939,6 +1953,270 @@ describe("createAuth", () => {
 					} as never,
 				),
 			).rejects.toThrow("connection terminated")
+		})
+	})
+
+	// a revoked session and a deleted user must lose their open sockets.
+	// The hook is what better-auth runs after the row is gone.
+	describe("session and user deletion", () => {
+		function endSession(
+			auth: ReturnType<typeof buildAuth>["auth"],
+			token: string,
+			ctx: unknown = null,
+		) {
+			return auth.options.databaseHooks.session.delete.after(
+				{ token } as never,
+				ctx as never,
+			)
+		}
+
+		function requireRedis(
+			redis: ReturnType<typeof buildAuth>["redis"],
+		): ReturnType<typeof stubRedis> {
+			if (!redis) {
+				throw new Error("expected a redis stub")
+			}
+
+			return redis as ReturnType<typeof stubRedis>
+		}
+
+		function passwordChange(token: string | null) {
+			return {
+				path: "/change-password",
+				context: {
+					session:
+						token === null
+							? null
+							: {
+									session: {
+										token,
+									},
+									user: {
+										id: "user-1",
+									},
+								},
+				},
+			}
+		}
+
+		// better-auth deletes this session too, then creates a new
+		// one. The open socket belongs to the device that just typed
+		// the password.
+		it("keeps the socket of the device that changed the password", async ({
+			expect,
+		}) => {
+			const {
+				auth,
+				closeSessionConnections,
+				closeUserConnections,
+				redis,
+			} = buildAuth()
+			const cache = requireRedis(redis)
+
+			await endSession(
+				auth,
+				"current",
+				passwordChange("current"),
+			)
+
+			expect(closeSessionConnections).not.toHaveBeenCalled()
+			expect(cache.del).not.toHaveBeenCalled()
+			expect(closeUserConnections).not.toHaveBeenCalled()
+		})
+
+		it("drops another session when the password changes", async ({
+			expect,
+		}) => {
+			const {
+				auth,
+				closeSessionConnections,
+				closeUserConnections,
+				redis,
+			} = buildAuth()
+			const cache = requireRedis(redis)
+
+			await endSession(
+				auth,
+				"other",
+				passwordChange("current"),
+			)
+
+			expect(closeSessionConnections.mock.calls).toEqual([
+				["other"],
+			])
+			expect(cache.del.mock.calls).toEqual([["other"]])
+			expect(closeUserConnections).not.toHaveBeenCalled()
+		})
+
+		it("drops the socket when a password change has no session", async ({
+			expect,
+		}) => {
+			const {
+				auth,
+				closeSessionConnections,
+				closeUserConnections,
+				redis,
+			} = buildAuth()
+			const cache = requireRedis(redis)
+
+			await endSession(auth, "gone", passwordChange(null))
+
+			expect(closeSessionConnections.mock.calls).toEqual([
+				["gone"],
+			])
+			expect(cache.del.mock.calls).toEqual([["gone"]])
+			expect(closeUserConnections).not.toHaveBeenCalled()
+		})
+
+		it.for([
+			"/sign-out",
+			"/delete-user",
+			"/reset-password",
+			"/revoke-session",
+			"/revoke-sessions",
+			"/revoke-other-sessions",
+		])(
+			"drops the socket when the session ends through %s",
+			async (path, { expect }) => {
+				const {
+					auth,
+					closeSessionConnections,
+					closeUserConnections,
+					redis,
+				} = buildAuth()
+				const cache = requireRedis(redis)
+
+				await endSession(auth, "current", {
+					path,
+					context: {
+						session: {
+							session: {
+								token: "current",
+							},
+							user: { id: "user-1" },
+						},
+					},
+				})
+
+				expect(
+					closeSessionConnections.mock.calls,
+				).toEqual([["current"]])
+				expect(cache.del.mock.calls).toEqual([
+					["current"],
+				])
+				expect(
+					closeUserConnections,
+				).not.toHaveBeenCalled()
+			},
+		)
+
+		it("drops a session deleted outside a request", async ({
+			expect,
+		}) => {
+			const {
+				auth,
+				closeSessionConnections,
+				closeUserConnections,
+				redis,
+			} = buildAuth()
+			const cache = requireRedis(redis)
+
+			await endSession(auth, "gone")
+
+			expect(closeSessionConnections.mock.calls).toEqual([
+				["gone"],
+			])
+			expect(cache.del.mock.calls).toEqual([["gone"]])
+			expect(closeUserConnections).not.toHaveBeenCalled()
+		})
+
+		it("drops the socket only after the cached session is gone", async ({
+			expect,
+		}) => {
+			const deleted = Promise.withResolvers<number>()
+			const cache = stubRedis()
+			cache.del.mockReturnValue(deleted.promise)
+			const {
+				auth,
+				closeSessionConnections,
+				closeUserConnections,
+			} = buildAuth({ redis: cache })
+
+			const pending = endSession(auth, "gone")
+
+			expect(cache.del.mock.calls).toEqual([["gone"]])
+			expect(closeSessionConnections).not.toHaveBeenCalled()
+
+			deleted.resolve(1)
+			await pending
+
+			expect(closeSessionConnections.mock.calls).toEqual([
+				["gone"],
+			])
+			expect(closeUserConnections).not.toHaveBeenCalled()
+		})
+
+		it("still drops the socket when the cached session cannot be deleted", async ({
+			expect,
+		}) => {
+			const cache = stubRedis()
+			cache.del.mockRejectedValue(new Error("valkey down"))
+			const {
+				auth,
+				closeSessionConnections,
+				closeUserConnections,
+			} = buildAuth({ redis: cache })
+
+			await expect(
+				endSession(auth, "gone"),
+			).resolves.toBeUndefined()
+
+			expect(cache.del.mock.calls).toEqual([["gone"]])
+			expect(closeSessionConnections.mock.calls).toEqual([
+				["gone"],
+			])
+			expect(closeUserConnections).not.toHaveBeenCalled()
+		})
+
+		it("drops the socket when valkey is not configured", async ({
+			expect,
+		}) => {
+			const {
+				auth,
+				closeSessionConnections,
+				closeUserConnections,
+				redis,
+			} = buildAuth({ redis: undefined })
+
+			await endSession(auth, "gone")
+
+			expect(redis).toBeUndefined()
+			expect(closeSessionConnections.mock.calls).toEqual([
+				["gone"],
+			])
+			expect(closeUserConnections).not.toHaveBeenCalled()
+		})
+
+		it("drops every socket when the user is deleted", async ({
+			expect,
+		}) => {
+			const {
+				auth,
+				closeUserConnections,
+				closeSessionConnections,
+				redis,
+			} = buildAuth()
+			const cache = requireRedis(redis)
+
+			await auth.options.databaseHooks.user.delete.after({
+				id: "user-1",
+			} as never)
+
+			expect(closeUserConnections.mock.calls).toEqual([
+				["user-1"],
+			])
+			expect(closeSessionConnections).not.toHaveBeenCalled()
+			expect(cache.del).not.toHaveBeenCalled()
 		})
 	})
 

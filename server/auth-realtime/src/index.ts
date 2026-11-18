@@ -41,13 +41,15 @@ if (env.valkeyDsn) {
 	await redis.connect()
 }
 
-// hocuspocus comes first, so auth can drop a user's connections when their
-// role changes. Its session lookup only runs once a client connects.
+// hocuspocus comes first, so auth can drop connections when a role
+// changes or a session ends. Its session lookup only runs once a
+// client connects.
 const {
 	instance: hocuspocus,
 	flushDocument,
 	resetConnections,
 	closeUserConnections,
+	closeSessionConnections,
 } = createHocuspocus({
 	auth: { getSession: (input) => auth.api.getSession(input) },
 	store,
@@ -63,6 +65,7 @@ const auth = createAuth({
 	core,
 	log,
 	closeUserConnections,
+	closeSessionConnections,
 })
 const authContext = await auth.$context
 

@@ -19,7 +19,11 @@ import {
 
 export interface AuthSession {
 	user: { id: string }
-	session: { activeOrganizationId?: string | null }
+	session: {
+		// present once getSession has resolved. A revocation matches on it.
+		token?: string
+		activeOrganizationId?: string | null
+	}
 }
 
 // the one thing the document hooks ask of better-auth. Narrowing it here
@@ -110,6 +114,24 @@ export function closeUserConnections(
 	for (const document of server.documents.values()) {
 		for (const [connection] of document.connections) {
 			if (connection.context?.session?.user.id === userId) {
+				dropConnection(connection)
+			}
+		}
+	}
+}
+
+// closeSessionConnections drops every socket authenticated with this
+// session. Sockets of the user's other sessions stay open.
+export function closeSessionConnections(
+	server: ResettableServer,
+	sessionToken: string,
+): void {
+	for (const document of server.documents.values()) {
+		for (const [connection] of document.connections) {
+			if (
+				connection.context?.session?.session.token ===
+				sessionToken
+			) {
 				dropConnection(connection)
 			}
 		}
@@ -321,10 +343,10 @@ export function createDocumentHooks({
 			return { session }
 		},
 
-		// TODO kick users if auth becomes invalid later
+		// a deleted session drops its sockets from the session hook.
+		// This stays empty. It runs on every message, and re-reading
+		// the session here to catch expiry is a separate decision.
 		beforeHandleMessage() {
-			// periodically re-check better auth session and close
-			// the socket if needed
 			return Promise.resolve()
 		},
 
@@ -569,6 +591,7 @@ interface HocuspocusServer {
 	flushDocument: (documentName: string) => Promise<void>
 	resetConnections: (documentName: string) => void
 	closeUserConnections: (userId: string) => void
+	closeSessionConnections: (sessionToken: string) => void
 }
 
 export function createHocuspocus(deps: DocumentHookDeps): HocuspocusServer {
@@ -603,6 +626,9 @@ export function createHocuspocus(deps: DocumentHookDeps): HocuspocusServer {
 		},
 		closeUserConnections: (userId) => {
 			closeUserConnections(instance, userId)
+		},
+		closeSessionConnections: (sessionToken) => {
+			closeSessionConnections(instance, sessionToken)
 		},
 	}
 }

@@ -4,6 +4,7 @@ import {
 	createDocumentHooks,
 	createHocuspocus,
 	parseDocumentName,
+	closeSessionConnections,
 	closeUserConnections,
 	resetConnections,
 	resolveBranchId,
@@ -578,9 +579,8 @@ describe("createDocumentHooks", () => {
 	})
 
 	describe("beforeHandleMessage", () => {
-		// a placeholder for re-checking the session mid-connection; it
-		// must still resolve, because hocuspocus awaits it on every
-		// inbound message
+		// expiry is not re-checked per message. The hook must still
+		// resolve, because hocuspocus awaits it on every inbound message.
 		it("lets every message through", async ({ expect }) => {
 			const hooks = hooksWith(stubCore())
 
@@ -1613,6 +1613,118 @@ describe("closeUserConnections", () => {
 	})
 })
 
+describe("closeSessionConnections", () => {
+	// socket builds a writable connection authenticated with the given
+	// session token. close records whether it was already read-only.
+	function socket(token: string | undefined) {
+		const connection = {
+			readOnly: false,
+			readOnlyAtClose: undefined as boolean | undefined,
+			context: {
+				session: {
+					user: { id: "user-1" },
+					session: {
+						token,
+						activeOrganizationId: "org-1",
+					},
+				},
+			} as { session?: AuthSession } | undefined,
+			webSocket: {
+				close: vi.fn(() => {
+					connection.readOnlyAtClose =
+						connection.readOnly
+				}),
+			},
+		}
+
+		return connection
+	}
+
+	it("closes that session's sockets on every document with the reset code", ({
+		expect,
+	}) => {
+		const first = socket("token-a")
+		const second = socket("token-a")
+		const other = socket("token-b")
+		const server = {
+			documents: new Map([
+				[
+					"doc1-branch1",
+					{
+						connections: new Map([
+							[first, {}],
+							[other, {}],
+						]),
+					},
+				],
+				[
+					"doc2-default",
+					{
+						connections: new Map([
+							[second, {}],
+						]),
+					},
+				],
+			]),
+		}
+
+		closeSessionConnections(server, "token-a")
+
+		for (const connection of [first, second]) {
+			expect(connection.webSocket.close.mock.calls).toEqual([
+				[4205, "Reset Connection"],
+			])
+			expect(connection.readOnlyAtClose).toBe(true)
+		}
+
+		expect.soft(other.webSocket.close).toHaveBeenCalledTimes(0)
+		expect.soft(other.readOnly).toBe(false)
+	})
+
+	it("skips a connection without a session", ({ expect }) => {
+		const direct = socket("token-a")
+		direct.context = undefined
+		const server = {
+			documents: new Map([
+				[
+					"doc1-branch1",
+					{
+						connections: new Map([
+							[direct, {}],
+						]),
+					},
+				],
+			]),
+		}
+
+		closeSessionConnections(server, "token-a")
+
+		expect(direct.webSocket.close).toHaveBeenCalledTimes(0)
+		expect(direct.readOnly).toBe(false)
+	})
+
+	it("skips a connection whose session has no token", ({ expect }) => {
+		const bare = socket(undefined)
+		const server = {
+			documents: new Map([
+				[
+					"doc1-branch1",
+					{
+						connections: new Map([
+							[bare, {}],
+						]),
+					},
+				],
+			]),
+		}
+
+		closeSessionConnections(server, "token-a")
+
+		expect(bare.webSocket.close).toHaveBeenCalledTimes(0)
+		expect(bare.readOnly).toBe(false)
+	})
+})
+
 describe("createHocuspocus", () => {
 	it("sends the hocuspocus logger's per-connection lines out at DEBUG", ({
 		expect,
@@ -1695,6 +1807,21 @@ describe("createHocuspocus", () => {
 
 		expect(() => {
 			closeUserConnections("user-1")
+		}).not.toThrow()
+	})
+
+	it("closes session connections against its own server", ({
+		expect,
+	}) => {
+		const { closeSessionConnections } = createHocuspocus({
+			auth: stubAuth(),
+			store: stubStore(),
+			core: stubCore(),
+			log: stubLog(),
+		})
+
+		expect(() => {
+			closeSessionConnections("token-a")
 		}).not.toThrow()
 	})
 })
