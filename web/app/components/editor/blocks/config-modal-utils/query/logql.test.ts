@@ -227,6 +227,74 @@ describe("useLogQLQueryExtension", () => {
 		})
 	})
 
+	describe("when a regex value lists alternatives", () => {
+		it.for([
+			{
+				name: 'a stream selector like {app=~"api|',
+				doc: '{app=~"api|¦',
+				from: '{app=~"api|'.length,
+				field: "app",
+			},
+			{
+				name: "a negative regex matcher",
+				doc: '{app!~"api|¦',
+				from: '{app!~"api|'.length,
+				field: "app",
+			},
+			{
+				name: 'a label filter like | level=~"info|',
+				doc: '| level=~"info|¦',
+				from: '| level=~"info|'.length,
+				field: "level",
+			},
+			{
+				name: "an alternative that is partly typed",
+				doc: '{app=~"api|ap¦',
+				from: '{app=~"api|'.length,
+				field: "app",
+			},
+		])(
+			"starts the value completion after the last | for $name",
+			async ({ doc, from, field }, { expect }) => {
+				const { complete, captured } = makeComplete()
+
+				const res = await complete(doc)
+
+				expect(res.from).toBe(from)
+				expect(res.labels).toEqual(expect.arrayContaining(["api", 'a.b"c']))
+				expect(captured.fieldValuesParams?.value?.field).toBe(field)
+			},
+		)
+
+		it.for([
+			{
+				name: "an equality matcher",
+				doc: '{app="api|¦',
+				from: '{app="'.length,
+			},
+			{
+				name: "an inequality matcher",
+				doc: '{app!="api|¦',
+				from: '{app!="'.length,
+			},
+			{
+				name: "an escaped pipe",
+				doc: '{app=~"api\\|¦',
+				from: '{app=~"'.length,
+			},
+		])(
+			"keeps the value completion at the opening quote for $name",
+			async ({ doc, from }, { expect }) => {
+				const { complete } = makeComplete()
+
+				const res = await complete(doc)
+
+				expect(res.from).toBe(from)
+				expect(res.labels).toEqual(expect.arrayContaining(["api", 'a.b"c']))
+			},
+		)
+	})
+
 	it.for([
 		{ name: "a stage", doc: '{app="api"} | ¦', label: "json", key: "json" },
 		{

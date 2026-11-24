@@ -151,6 +151,24 @@ function valueMatcher(text: string) {
 	return { field: match[1], regex: match[2].endsWith("~") }
 }
 
+// alternativeStart is where the current regex alternative begins.
+// A | splits alternatives. A backslash escapes the next character,
+// so a \| stays part of the alternative.
+function alternativeStart(doc: string, open: number, pos: number) {
+	let start = open + 1
+
+	for (let i = open + 1; i < pos; i++) {
+		const c = doc.charAt(i)
+		if (c === "\\") {
+			i++
+		} else if (c === "|") {
+			start = i + 1
+		}
+	}
+
+	return start
+}
+
 // what the query holds before the cursor, read character by character.
 // The parse tree cannot say this alone. An unclosed string has no node,
 // but a value is typed in an unclosed string. string and selector are
@@ -376,9 +394,13 @@ export function useLogQLQueryExtension(
 					? null
 					: quoteValue(value, quote, matcher.regex)
 
+			const valueFrom = matcher.regex
+				? alternativeStart(doc, from, ctx.pos)
+				: from + 1
+
 			if (scan.selector !== null) {
 				return {
-					from: from + 1,
+					from: valueFrom,
 					options: await fieldValues(
 						matcher.field,
 						otherMatchers(doc, scan.selector, ctx.pos),
@@ -392,7 +414,7 @@ export function useLogQLQueryExtension(
 			}
 
 			return {
-				from: from + 1,
+				from: valueFrom,
 				options: await fieldValues(
 					matcher.field,
 					doc.slice(0, scan.stagePipe).trim(),
