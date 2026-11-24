@@ -152,17 +152,40 @@ function valueMatcher(text: string) {
 }
 
 // alternativeStart is where the current regex alternative begins.
-// A | splits alternatives. A backslash escapes the next character,
-// so a \| stays part of the alternative.
-function alternativeStart(doc: string, open: number, pos: number) {
-	let start = open + 1
+// Double quotes decode \\ into one backslash before the regex is
+// read. Backticks are already the regex. A backslash hides the next
+// character, and a bare | starts the next alternative.
+function alternativeStart(
+	doc: string,
+	open: number,
+	pos: number,
+	quote: string,
+) {
+	const decoded: { char: string; index: number }[] = []
 
 	for (let i = open + 1; i < pos; i++) {
 		const c = doc.charAt(i)
-		if (c === "\\") {
+		if (quote === '"' && c === "\\") {
 			i++
-		} else if (c === "|") {
-			start = i + 1
+
+			if (i < pos) {
+				decoded.push({ char: doc.charAt(i), index: i })
+			}
+		} else {
+			decoded.push({ char: c, index: i })
+		}
+	}
+
+	let start = open + 1
+	let escaped = false
+
+	for (const item of decoded) {
+		if (escaped) {
+			escaped = false
+		} else if (item.char === "\\") {
+			escaped = true
+		} else if (item.char === "|") {
+			start = item.index + 1
 		}
 	}
 
@@ -395,7 +418,7 @@ export function useLogQLQueryExtension(
 					: quoteValue(value, quote, matcher.regex)
 
 			const valueFrom = matcher.regex
-				? alternativeStart(doc, from, ctx.pos)
+				? alternativeStart(doc, from, ctx.pos, quote)
 				: from + 1
 
 			if (scan.selector !== null) {

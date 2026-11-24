@@ -253,6 +253,24 @@ describe("useLogQLQueryExtension", () => {
 				from: '{app=~"api|'.length,
 				field: "app",
 			},
+			{
+				name: "four backslashes before a pipe in double quotes",
+				doc: '{app=~"api\\\\\\\\|¦',
+				from: '{app=~"api\\\\\\\\|'.length,
+				field: "app",
+			},
+			{
+				name: "two backslashes before a pipe in backticks",
+				doc: "{app=~`api\\\\|¦",
+				from: "{app=~`api\\\\|".length,
+				field: "app",
+			},
+			{
+				name: "a pipe after an escaped quote",
+				doc: '{app=~"a\\"b|¦',
+				from: '{app=~"a\\"b|'.length,
+				field: "app",
+			},
 		])(
 			"starts the value completion after the last | for $name",
 			async ({ doc, from, field }, { expect }) => {
@@ -278,9 +296,14 @@ describe("useLogQLQueryExtension", () => {
 				from: '{app!="'.length,
 			},
 			{
-				name: "an escaped pipe",
-				doc: '{app=~"api\\|¦',
+				name: "two backslashes before a pipe in double quotes",
+				doc: '{app=~"api\\\\|¦',
 				from: '{app=~"'.length,
+			},
+			{
+				name: "one backslash before a pipe in backticks",
+				doc: "{app=~`api\\|¦",
+				from: "{app=~`".length,
 			},
 		])(
 			"keeps the value completion at the opening quote for $name",
